@@ -5,11 +5,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy import Integer, String, bindparam, create_engine, text
-from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.engine import Engine
 
 from backend.app.integrations.gupy import get_job
-from backend.app.services.algorithm_profile import analyze_job
 from backend.app.services.cv_parser import process_cv
 from backend.app.services.profile_matcher import analyze_match
 
@@ -20,14 +18,10 @@ QUESTION_QUERY = text(
     """
     SELECT slug, title, difficulty, tags, content_md
     FROM questions
-    WHERE tags && :tags
-      AND difficulty = :difficulty
-    ORDER BY random()
+    ORDER BY slug
     LIMIT :limit
     """
 ).bindparams(
-    bindparam("tags", type_=ARRAY(String)),
-    bindparam("difficulty", type_=String),
     bindparam("limit", type_=Integer),
 )
 
@@ -57,7 +51,7 @@ def query_questions(
     with active_engine.connect() as connection:
         result = connection.execute(
             QUESTION_QUERY,
-            {"tags": tags, "difficulty": difficulty, "limit": limit},
+            {"limit": limit},
         )
         return [dict(row._mapping) for row in result]
 
@@ -71,12 +65,14 @@ def build_preparation(
 ) -> dict:
     job = get_job(job_url)
     candidate = process_cv(cv_path)
-    match = analyze_match(candidate, job)
-    algorithm_profile = analyze_job(job, match)
+    generated = analyze_match(candidate, job)
+    algorithm_profile = generated.pop("algorithm_profile")
+    diagnostic_questions = generated.pop("diagnostic_questions")
+    match = generated
     questions = query_questions(
         algorithm_profile["tags"],
         algorithm_profile["difficulty"],
-        question_limit,
+        max(question_limit, 30),
         db_engine=db_engine,
     )
 
@@ -86,6 +82,7 @@ def build_preparation(
         "match": match,
         "algorithm_profile": algorithm_profile,
         "questions": questions,
+        "diagnostic_questions": diagnostic_questions,
     }
 
 
