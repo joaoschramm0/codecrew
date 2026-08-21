@@ -175,6 +175,16 @@ class AnswerRequest(BaseModel):
     tipo: Literal["texto", "nao_sei", "nao_se_aplica"]
     texto: str | None = None
 
+    @model_validator(mode="after")
+    def validate_content(self):
+        validated = DiagnosticAnswer(
+            question_id="request",
+            tipo=self.tipo,
+            texto=self.texto,
+        )
+        self.texto = validated.texto
+        return self
+
 class MentorRequest(BaseModel):
     challenge_slug: str
     message: str = Field(min_length=1, max_length=4000)

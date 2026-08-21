@@ -44,12 +44,13 @@ import {
   saveDiagnosticAnswer,
   sendMentorMessage,
   submitDiagnostic,
+  retryDiagnostic,
   type ChatMessage,
   type Preparation,
   type Question,
 } from "./api/preparations";
 
-type Screen = "onboarding" | "loading" | "diagnostic" | "stories" | "workspace";
+type Screen = "onboarding" | "loading" | "diagnostic" | "evaluation-recovery" | "stories" | "workspace";
 type WorkspaceTab = "chat" | "topics" | "challenges";
 type LoadStatus = "pending" | "success" | "error";
 type Submission = { jobUrl: string; cv: File };
@@ -303,6 +304,18 @@ function DiagnosticScreen({ preparation, onChange, onComplete }: { preparation: 
   </section></main>;
 }
 
+function EvaluationRecovery({ preparation, onComplete }: { preparation: Preparation; onComplete: (value: Preparation) => void }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  async function retry() {
+    setPending(true); setError("");
+    try { onComplete(await retryDiagnostic(preparation.id)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível retomar a avaliação."); }
+    finally { setPending(false); }
+  }
+  return <main className="loading page-shell"><header className="topbar"><Brand /></header><section className="loading__content"><h1>A avaliação precisa ser retomada</h1><p>Suas quatro respostas estão salvas. Você pode tentar concluir o diagnóstico sem respondê-las novamente.</p>{error && <p className="form-error">{error}</p>}<button className="primary-button" type="button" disabled={pending} onClick={retry}><RefreshCw size={18} />{pending ? "Avaliando..." : "Retomar avaliação"}</button></section></main>;
+}
+
 type Story = {
   title: string;
   description: string;
@@ -488,12 +501,17 @@ function ChatPanel({ preparation, challengeSlug }: { preparation: Preparation; c
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [typing, setTyping] = useState(false);
+  const [historyReady, setHistoryReady] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    let active = true;
+    setHistoryReady(false);
     getMentorship(preparation.id, challengeSlug)
-      .then((value) => setMessages(value.messages.map(({ role, content }) => ({ role, content }))))
-      .catch(() => setMessages([]));
+      .then((value) => { if (active) setMessages(value.messages.map(({ role, content }) => ({ role, content }))); })
+      .catch(() => { if (active) setMessages([]); })
+      .finally(() => { if (active) setHistoryReady(true); });
+    return () => { active = false; };
   }, [challengeSlug, preparation.id]);
 
   useEffect(() => {
@@ -502,7 +520,7 @@ function ChatPanel({ preparation, challengeSlug }: { preparation: Preparation; c
 
   async function send(content = draft) {
     const message = content.trim();
-    if (!message || typing) return;
+    if (!message || typing || !historyReady) return;
     const nextMessages: ChatMessage[] = [...messages, { role: "user", content: message }];
     setMessages(nextMessages);
     setDraft("");
@@ -545,13 +563,13 @@ function ChatPanel({ preparation, challengeSlug }: { preparation: Preparation; c
       <div className="quick-actions">
         {quickActions.map((action) => {
           const Icon = action.icon;
-          return <button key={action.label} type="button" onClick={() => send(action.prompt)}><Icon size={15} />{action.label}</button>;
+          return <button key={action.label} type="button" disabled={!historyReady} onClick={() => send(action.prompt)}><Icon size={15} />{action.label}</button>;
         })}
       </div>
 
       <form className="chat-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
-        <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Pergunte ou escolha uma atividade..." />
-        <button className="send-button" type="submit" aria-label="Enviar mensagem" title="Enviar mensagem" disabled={!draft.trim() || typing}><Send size={19} /></button>
+        <input disabled={!historyReady} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={historyReady ? "Pergunte ou escolha uma atividade..." : "Carregando histórico..."} />
+        <button className="send-button" type="submit" aria-label="Enviar mensagem" title="Enviar mensagem" disabled={!draft.trim() || typing || !historyReady}><Send size={19} /></button>
       </form>
     </section>
   );
@@ -683,7 +701,7 @@ export default function App() {
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("preparation");
     if (!id) return;
-    getPreparation(id).then((value) => { setPreparation(value); setScreen(value.status === "aguardando_diagnostico" ? "diagnostic" : value.status === "avaliacao_em_processamento" ? "loading" : "stories"); }).catch(() => window.history.replaceState(null, "", window.location.pathname));
+    getPreparation(id).then((value) => { setPreparation(value); setScreen(value.status === "aguardando_diagnostico" ? "diagnostic" : value.status === "avaliacao_em_processamento" ? "evaluation-recovery" : "stories"); }).catch(() => window.history.replaceState(null, "", window.location.pathname));
   }, []);
 
   function reset() {
@@ -698,6 +716,7 @@ export default function App() {
   if (screen === "onboarding") return <Onboarding onSubmit={runPreparation} />;
   if (screen === "loading" && submission) return <LoadingScreen submission={submission} preparation={preparation} status={loadStatus} error={loadError} onRetry={() => runPreparation(submission)} onBack={reset} />;
   if (screen === "diagnostic" && preparation) return <DiagnosticScreen preparation={preparation} onChange={setPreparation} onComplete={(value) => { setPreparation(value); setScreen("stories"); }} />;
+  if (screen === "evaluation-recovery" && preparation) return <EvaluationRecovery preparation={preparation} onComplete={(value) => { setPreparation(value); setScreen("stories"); }} />;
   if (screen === "stories" && preparation) return <StoriesScreen preparation={preparation} onComplete={() => setScreen("workspace")} />;
   if (preparation) return <Workspace preparation={preparation} onReset={reset} />;
   return <Onboarding onSubmit={runPreparation} />;
