@@ -15,7 +15,6 @@ import {
   Link2,
   LockKeyhole,
   MessageCircle,
-  Paperclip,
   RefreshCw,
   RotateCcw,
   Rocket,
@@ -40,13 +39,17 @@ import {
 } from "react";
 import {
   createPreparation,
+  getPreparation,
+  getMentorship,
+  saveDiagnosticAnswer,
   sendMentorMessage,
+  submitDiagnostic,
   type ChatMessage,
   type Preparation,
   type Question,
 } from "./api/preparations";
 
-type Screen = "onboarding" | "loading" | "stories" | "workspace";
+type Screen = "onboarding" | "loading" | "diagnostic" | "stories" | "workspace";
 type WorkspaceTab = "chat" | "topics" | "challenges";
 type LoadStatus = "pending" | "success" | "error";
 type Submission = { jobUrl: string; cv: File };
@@ -262,6 +265,44 @@ function LoadingScreen({
   );
 }
 
+function DiagnosticScreen({ preparation, onChange, onComplete }: { preparation: Preparation; onChange: (value: Preparation) => void; onComplete: (value: Preparation) => void }) {
+  const [index, setIndex] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const question = preparation.diagnostic_questions[index];
+  const saved = preparation.answers[question.id];
+  const [text, setText] = useState(saved?.texto ?? "");
+  const [type, setType] = useState<"texto" | "nao_sei" | "nao_se_aplica">(saved?.tipo ?? "texto");
+
+  useEffect(() => { const answer = preparation.answers[question.id]; setText(answer?.texto ?? ""); setType(answer?.tipo ?? "texto"); }, [question.id, preparation.answers]);
+
+  async function saveAndMove(next: number): Promise<boolean> {
+    const clean = text.trim();
+    if (type === "texto" && !clean) { setError("Escreva uma resposta ou selecione uma das opções."); return false; }
+    setSaving(true); setError("");
+    try { const updated = await saveDiagnosticAnswer(preparation.id, question.id, { tipo: type, texto: type === "texto" ? clean : undefined }); onChange(updated); setIndex(next); return true; }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível salvar."); return false; }
+    finally { setSaving(false); }
+  }
+
+  async function finish() {
+    if (!await saveAndMove(index)) return;
+    setSaving(true);
+    try { const updated = await submitDiagnostic(preparation.id); onComplete(updated); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Não foi possível avaliar agora."); }
+    finally { setSaving(false); }
+  }
+
+  return <main className="diagnostic page-shell"><header className="topbar"><Brand /><span>Diagnóstico técnico inicial</span></header><section className="diagnostic-card">
+    <div className="diagnostic-progress"><strong>{index + 1} de 4</strong><span><i style={{ width: `${(index + 1) * 25}%` }} /></span></div>
+    <p className="eyebrow">{question.categoria} · {question.competencia}</p><h1>{question.texto}</h1>
+    <p className="safe-note"><LockKeyhole size={16} /> Isto serve somente para sua preparação, não para contratação. Suas respostas são privadas.</p>
+    <textarea maxLength={1000} disabled={type !== "texto"} value={text} onChange={(event) => { setText(event.target.value); setType("texto"); }} placeholder="Explique brevemente seu raciocínio..." />
+    <div className="answer-options"><label><input type="radio" checked={type === "nao_sei"} onChange={() => { setType("nao_sei"); setText(""); }} /> Não sei responder</label><label><input type="radio" checked={type === "nao_se_aplica"} onChange={() => { setType("nao_se_aplica"); setText(""); }} /> Esta pergunta não se aplica</label></div>
+    {error && <p className="form-error">{error}</p>}<div className="diagnostic-actions"><button className="secondary-button" disabled={index === 0 || saving} onClick={() => saveAndMove(index - 1)}><ArrowLeft size={18} />Voltar</button>{index < 3 ? <button className="primary-button" disabled={saving} onClick={() => saveAndMove(index + 1)}>Salvar e continuar<ArrowRight size={18} /></button> : <button className="primary-button" disabled={saving} onClick={finish}>Confirmar e enviar<Check size={18} /></button>}</div>
+  </section></main>;
+}
+
 type Story = {
   title: string;
   description: string;
@@ -289,6 +330,8 @@ function conciseSummary(value: string, limit = 125) {
 
 function buildStories(preparation: Preparation): Story[] {
   const { candidate, match, questions } = preparation;
+  const readiness = preparation.readiness;
+  const observed = preparation.assessments;
   const strengths = match.pontos_fortes.length
     ? match.pontos_fortes.slice(0, 3)
     : candidate.habilidades.slice(0, 3).length
@@ -315,6 +358,11 @@ function buildStories(preparation: Preparation): Story[] {
       ),
     },
     {
+      title: readiness?.indice_preparacao != null ? `Seu Índice de preparação é ${readiness.indice_preparacao}.` : "Seu diagnóstico técnico ainda está incompleto.",
+      description: readiness?.indice_preparacao != null ? `Baseline específico para esta vaga: ${readiness.aderencia_curricular}% de aderência curricular e ${readiness.prontidao_tecnica}% de prontidão técnica. É uma estimativa preparatória, não uma nota ou probabilidade de contratação.` : "Há evidência insuficiente para publicar prontidão técnica ou um índice composto.",
+      visual: <div className="score-orbit" style={{ "--score": `${(readiness?.indice_preparacao ?? 0) * 3.6}deg` } as CSSProperties}><span>{readiness?.indice_preparacao ?? "—"}</span><small>baseline</small></div>,
+    },
+    {
       title: "Sua experiência já oferece bons pontos de conexão.",
       description: "Estes são os pontos mais relevantes encontrados no seu currículo para esta vaga.",
       visual: (
@@ -336,6 +384,11 @@ function buildStories(preparation: Preparation): Story[] {
       title: "Seu primeiro foco já está claro.",
       description: firstFocus,
       visual: <div className="path-visual"><span>{shortLabel(firstStrength)}</span><ArrowRight size={22} /><span>{shortLabel(firstGap)}</span><ArrowRight size={22} /><span>Entrevista</span></div>,
+    },
+    {
+      title: "O nível observado foi comparado somente com o esperado para a vaga.",
+      description: "Evidência curricular e evidência técnica permanecem separadas; confiança baixa não entra no cálculo.",
+      visual: <div className="story-list">{observed.slice(0, 4).map((item) => <div key={item.question_id}><strong>{item.competencia}: {item.nivel_observado}</strong> · esperado {item.nivel_esperado} · confiança {item.confianca}</div>)}</div>,
     },
     {
       title: "Sua preparação começa agora.",
@@ -413,7 +466,7 @@ function MentorIcon() {
   return <span className="mentor-icon"><img src="/codecrew-robot.webp" alt="" /></span>;
 }
 
-function ChatPanel({ preparation }: { preparation: Preparation }) {
+function ChatPanel({ preparation, challengeSlug }: { preparation: Preparation; challengeSlug: string }) {
   const firstGap = preparation.match.lacunas[0]?.requisito;
   const welcomeMessage = useMemo(() => [
     `Analisei sua candidatura para **${preparation.job.titulo}**.`,
@@ -438,6 +491,12 @@ function ChatPanel({ preparation }: { preparation: Preparation }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    getMentorship(preparation.id, challengeSlug)
+      .then((value) => setMessages(value.messages.map(({ role, content }) => ({ role, content }))))
+      .catch(() => setMessages([]));
+  }, [challengeSlug, preparation.id]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, typing]);
 
@@ -449,7 +508,7 @@ function ChatPanel({ preparation }: { preparation: Preparation }) {
     setDraft("");
     setTyping(true);
     try {
-      const reply = await sendMentorMessage(preparation.id, nextMessages);
+      const reply = await sendMentorMessage(preparation.id, challengeSlug, message);
       setMessages((current) => [...current, { role: "assistant", content: reply }]);
     } catch (error) {
       const content = error instanceof Error ? error.message : "Não foi possível falar com o mentor agora.";
@@ -491,7 +550,6 @@ function ChatPanel({ preparation }: { preparation: Preparation }) {
       </div>
 
       <form className="chat-input" onSubmit={(event) => { event.preventDefault(); send(); }}>
-        <button type="button" aria-label="Adicionar anexo"><Paperclip size={19} /></button>
         <input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Pergunte ou escolha uma atividade..." />
         <button className="send-button" type="submit" aria-label="Enviar mensagem" title="Enviar mensagem" disabled={!draft.trim() || typing}><Send size={19} /></button>
       </form>
@@ -526,7 +584,7 @@ function TopicsPanel({ preparation, onDiscuss }: { preparation: Preparation; onD
   );
 }
 
-function ChallengesPanel({ preparation }: { preparation: Preparation }) {
+function ChallengesPanel({ preparation, onMentor }: { preparation: Preparation; onMentor: (slug: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedQuestion, setSelectedQuestion] = useState<Question | null>(null);
   const questions = expanded ? preparation.questions : preparation.questions.slice(0, 4);
@@ -545,6 +603,7 @@ function ChallengesPanel({ preparation }: { preparation: Preparation }) {
         <article className="markdown-content">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedQuestion.content_md}</ReactMarkdown>
         </article>
+        <button className="primary-button" type="button" onClick={() => onMentor(selectedQuestion.slug)}><MessageCircle size={18} />Iniciar mentoria deste desafio</button>
       </section>
     );
   }
@@ -553,7 +612,7 @@ function ChallengesPanel({ preparation }: { preparation: Preparation }) {
     <section className="content-panel">
       <div className="section-heading"><h2>Desafios recomendados</h2></div>
       <div className="challenge-list">
-        {questions.map((question, index) => <article className="challenge-row" key={question.slug}><span className="challenge-index">{String(index + 1).padStart(2, "0")}</span><span className="challenge-title"><strong>{question.title}</strong><small>{question.tags.join(" · ")}</small></span><button className="compact-icon-button" type="button" onClick={() => setSelectedQuestion(question)} aria-label={`Abrir desafio ${question.title}`} title="Abrir desafio"><ArrowRight size={18} /></button></article>)}
+        {questions.map((question, index) => { const recommendation = preparation.recommendations[index]; return <article className="challenge-row" key={question.slug}><span className="challenge-index">{String(index + 1).padStart(2, "0")}</span><span className="challenge-title"><strong>{recommendation?.papel}: {question.title}</strong><small>{recommendation?.justificativa ?? question.tags.join(" · ")}</small></span><button className="compact-icon-button" type="button" onClick={() => setSelectedQuestion(question)} aria-label={`Abrir desafio ${question.title}`} title="Abrir desafio"><ArrowRight size={18} /></button></article>; })}
       </div>
       {preparation.questions.length > 4 && <button className="outline-button" type="button" onClick={() => setExpanded((current) => !current)}>{expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}<span>{expanded ? "Mostrar menos" : "Ver todos os desafios"}</span></button>}
     </section>
@@ -562,6 +621,7 @@ function ChallengesPanel({ preparation }: { preparation: Preparation }) {
 
 function Workspace({ preparation, onReset }: { preparation: Preparation; onReset: () => void }) {
   const [tab, setTab] = useState<WorkspaceTab>("chat");
+  const [challengeSlug, setChallengeSlug] = useState(preparation.recommendations[0]?.desafio.slug ?? "");
   const gaps = preparation.match.lacunas.slice(0, 3);
   const summary = conciseSummary(preparation.match.resumo);
 
@@ -585,9 +645,9 @@ function Workspace({ preparation, onReset }: { preparation: Preparation; onReset
         </aside>
 
         <div className="workspace-view" key={tab}>
-          {tab === "chat" && <ChatPanel preparation={preparation} />}
+          {tab === "chat" && challengeSlug && <ChatPanel preparation={preparation} challengeSlug={challengeSlug} />}
           {tab === "topics" && <TopicsPanel preparation={preparation} onDiscuss={() => setTab("chat")} />}
-          {tab === "challenges" && <ChallengesPanel preparation={preparation} />}
+          {tab === "challenges" && <ChallengesPanel preparation={preparation} onMentor={(slug) => { setChallengeSlug(slug); setTab("chat"); }} />}
         </div>
       </div>
     </main>
@@ -611,12 +671,19 @@ export default function App() {
     try {
       const result = await createPreparation(input.jobUrl, input.cv);
       setPreparation(result);
+      window.history.replaceState(null, "", `?preparation=${result.id}`);
       setLoadStatus("success");
-      window.setTimeout(() => setScreen("stories"), 650);
+      window.setTimeout(() => setScreen("diagnostic"), 650);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Não foi possível concluir a preparação.");
       setLoadStatus("error");
     }
+  }, []);
+
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("preparation");
+    if (!id) return;
+    getPreparation(id).then((value) => { setPreparation(value); setScreen(value.status === "aguardando_diagnostico" ? "diagnostic" : value.status === "avaliacao_em_processamento" ? "loading" : "stories"); }).catch(() => window.history.replaceState(null, "", window.location.pathname));
   }, []);
 
   function reset() {
@@ -625,10 +692,12 @@ export default function App() {
     setLoadError("");
     setLoadStatus("pending");
     setScreen("onboarding");
+    window.history.replaceState(null, "", window.location.pathname);
   }
 
   if (screen === "onboarding") return <Onboarding onSubmit={runPreparation} />;
   if (screen === "loading" && submission) return <LoadingScreen submission={submission} preparation={preparation} status={loadStatus} error={loadError} onRetry={() => runPreparation(submission)} onBack={reset} />;
+  if (screen === "diagnostic" && preparation) return <DiagnosticScreen preparation={preparation} onChange={setPreparation} onComplete={(value) => { setPreparation(value); setScreen("stories"); }} />;
   if (screen === "stories" && preparation) return <StoriesScreen preparation={preparation} onComplete={() => setScreen("workspace")} />;
   if (preparation) return <Workspace preparation={preparation} onReset={reset} />;
   return <Onboarding onSubmit={runPreparation} />;

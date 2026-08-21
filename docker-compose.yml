@@ -1,10 +1,29 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: codecrew
+      POSTGRES_USER: codecrew
+      POSTGRES_PASSWORD: codecrew
+    volumes:
+      - codecrew-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codecrew"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://codecrew:codecrew@postgres:5432/codecrew
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8000:8000"
     healthcheck:
@@ -24,3 +43,6 @@ services:
     ports:
       - "5173:80"
     restart: unless-stopped
+
+volumes:
+  codecrew-postgres:
